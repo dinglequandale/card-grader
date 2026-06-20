@@ -93,6 +93,55 @@ def detect_edge_defects(bank: TemporalBank, size: tuple) -> List[dict]:
     return verdicts
 
 
+def merge_edge_runs(verdicts: List[dict], size: tuple, gap_frac: float = 0.03) -> List[dict]:
+    """Collapse per-side over-segmentation. edge_inspect + the border-band
+    saliency pass chop a single whitened edge into many slivers; each sliver
+    that misses a (coarse) annotation reads as a false positive and each one
+    over-penalizes grading. Merge same-side detections whose runs overlap or sit
+    within gap_frac of each other ALONG the edge, keeping the worst severity. A
+    detection far from any neighbour (e.g. a lone clean-edge FP) stays separate,
+    so this collapses real-damage over-segmentation WITHOUT hiding genuine FPs.
+
+    Diagnosed on sample_3 back: 61 edge detections / 35 'FPs', ALL on the four
+    annotated (whitened) edges, ZERO on clean edge -- pure over-segmentation."""
+    from collections import defaultdict
+    W, H = size
+    by_side: dict = defaultdict(list)
+    passthrough = []
+    for v in verdicts:
+        if v.get("side") in ("top", "bottom", "left", "right"):
+            by_side[v["side"]].append(v)
+        else:
+            passthrough.append(v)
+
+    out = list(passthrough)
+    for side, vs in by_side.items():
+        horizontal = side in ("top", "bottom")
+        gap = gap_frac * (W if horizontal else H)
+        lo = lambda v: v["bbox"][0] if horizontal else v["bbox"][1]
+        hi = lambda v: (v["bbox"][0] + v["bbox"][2]) if horizontal else (v["bbox"][1] + v["bbox"][3])
+        vs.sort(key=lo)
+        cur = None
+        for v in vs:
+            if cur is None:
+                cur = {**v, "bbox": list(v["bbox"])}
+                continue
+            if lo(v) <= hi(cur) + gap:                       # contiguous run -> merge
+                x0 = min(cur["bbox"][0], v["bbox"][0]); y0 = min(cur["bbox"][1], v["bbox"][1])
+                x1 = max(cur["bbox"][0] + cur["bbox"][2], v["bbox"][0] + v["bbox"][2])
+                y1 = max(cur["bbox"][1] + cur["bbox"][3], v["bbox"][1] + v["bbox"][3])
+                cur["bbox"] = [x0, y0, x1 - x0, y1 - y0]
+                if v.get("severity", 0) > cur.get("severity", 0):
+                    cur["severity"] = v["severity"]
+                    cur["type"] = v.get("type", cur.get("type"))
+            else:
+                out.append(cur)
+                cur = {**v, "bbox": list(v["bbox"])}
+        if cur is not None:
+            out.append(cur)
+    return out
+
+
 def detect_corner_defects(edge_verdicts: List[dict]) -> List[dict]:
     """Promote edge-strip-end defects (outer CORNER_END_PCT) to corner verdicts.
     Shaped for grade_synthesis.corners_grade_from_verdicts: {side: 'corner_XX', ...}."""

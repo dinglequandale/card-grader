@@ -26,7 +26,8 @@ from phase3.grade_synthesis import (
 )
 from video.ingest import ingest_video, CANONICAL_SIZE
 from video.temporal import build_bank, TemporalBank
-from video.perimeter import detect_edge_defects, detect_corner_defects, detect_edge_surface_defects
+from video.perimeter import (detect_edge_defects, detect_corner_defects,
+                             detect_edge_surface_defects, merge_edge_runs)
 from video.surface import detect_surface_defects
 
 
@@ -47,9 +48,10 @@ def grade_video(video_path: str, face: str = "front",
         "face": face, "warped": bank.median, "rois": rois, "classification": classification,
     })
 
-    edge_verdicts = detect_edge_defects(bank, bank.median.shape[1::-1])
-    edge_verdicts += detect_edge_surface_defects(bank)
-    corner_verdicts = detect_corner_defects(edge_verdicts)
+    edge_verdicts_raw = detect_edge_defects(bank, bank.median.shape[1::-1])
+    edge_verdicts_raw += detect_edge_surface_defects(bank)
+    corner_verdicts = detect_corner_defects(edge_verdicts_raw)   # needs start_pct
+    edge_verdicts = merge_edge_runs(edge_verdicts_raw, bank.median.shape[1::-1])
     surface_verdicts = detect_surface_defects(bank, reference=reference)
 
     corners = corners_grade_from_verdicts(corner_verdicts)
@@ -74,15 +76,19 @@ def grade_video(video_path: str, face: str = "front",
 
 
 def _detections_for_eval(result: dict) -> list:
-    """Flatten all pillar detections into (bbox, pillar) tuples, canonical
-    600x825 frame, for eval/run_eval.py overlap matching against annotations."""
+    """Flatten all pillar detections into dicts, canonical 600x825 frame, for
+    eval/run_eval.py overlap matching against annotations (recall + precision).
+    Each: {"bbox": (x,y,w,h), "pillar": str, "severity": int|None}."""
     dets = []
     for v in result["surface_verdicts"]:
-        dets.append((tuple(v["bbox"]), "surface"))
+        dets.append({"bbox": tuple(v["bbox"]), "pillar": "surface",
+                     "severity": v["verdict"]["severity"]})
     for v in result["edge_verdicts"]:
         if "bbox" in v:
-            dets.append((tuple(v["bbox"]), "edges"))
+            dets.append({"bbox": tuple(v["bbox"]), "pillar": "edges",
+                         "severity": v.get("severity")})
     for v in result["corner_verdicts"]:
         if "bbox" in v:
-            dets.append((tuple(v["bbox"]), "corners"))
+            dets.append({"bbox": tuple(v["bbox"]), "pillar": "corners",
+                         "severity": v.get("severity")})
     return dets

@@ -42,6 +42,9 @@ from skimage.filters import frangi
 
 FRANGI_SIGMAS = [1, 2, 3]
 PATCH_TOLERANCE_RADIUS = 2
+RIDGE_DILATE_RADIUS = 1         # static-ridge cancel tolerance (px). Smaller than
+                                 # PATCH_TOLERANCE_RADIUS on purpose: larger radii
+                                 # over-cancel real line-defects on busy artwork.
 GRADIENT_ATTENUATION = 0.85
 GRADIENT_PERCENTILE = 95
 RESPONSE_NORM_PERCENTILE = 99.5
@@ -110,6 +113,18 @@ def build_bank(frames: list) -> TemporalBank:
     # ── defect_saliency: detect-then-aggregate, max-projected across frames ──
     atten = _gradient_attenuation_map(median_gray)
     f_median = frangi(median_gray / 255.0, sigmas=FRANGI_SIGMAS, black_ridges=True).astype(np.float32)
+    # Patch-tolerant static-ridge reference: dilating the median's ridge map by
+    # RIDGE_DILATE_RADIUS lets a static artwork/foil ridge that is displaced by
+    # sub-pixel registration residual still cancel against it. Without this the
+    # ridge channel flagged every artwork edge whose frangi response shifts
+    # frame-to-frame -- the dominant clean-area false-positive source. This is
+    # the ridge analogue of _patch_tolerant_delta's tolerance, but with a SMALLER
+    # radius (1, not PATCH_TOLERANCE_RADIUS=2): per-defect controlled testing on
+    # sample_3 back showed radius 2 over-cancels real scratches/creases that sit
+    # on busy artwork (lost a scratch + a crease), while radius 1 keeps full
+    # recall AND still cuts surface FPs ~59% (37->15). Provisional, n=1.
+    _k = 2 * RIDGE_DILATE_RADIUS + 1
+    f_median_dil = cv2.dilate(f_median, np.ones((_k, _k), np.float32))
 
     labs = [cv2.cvtColor(f, cv2.COLOR_BGR2LAB).astype(np.float32) for f in frames]
     lab_stack = np.stack(labs)
@@ -121,7 +136,7 @@ def build_bank(frames: list) -> TemporalBank:
     r_chroma = np.zeros((H, W), np.float32)
     for g, lab in zip(grays, labs):
         ridge = np.clip(
-            frangi(g / 255.0, sigmas=FRANGI_SIGMAS, black_ridges=True).astype(np.float32) - f_median,
+            frangi(g / 255.0, sigmas=FRANGI_SIGMAS, black_ridges=True).astype(np.float32) - f_median_dil,
             0, None)
         r_ridge = np.maximum(r_ridge, ridge)
         r_dev = np.maximum(r_dev, _patch_tolerant_delta(g, median_gray))
@@ -129,6 +144,14 @@ def build_bank(frames: list) -> TemporalBank:
         d_b = _patch_tolerant_delta(lab[..., 2], median_ab[..., 1])
         r_chroma = np.maximum(r_chroma, np.sqrt(d_a * d_a + d_b * d_b))
 
+    # NOTE: r_ridge is deliberately NOT multiplied by `atten`. The dev/chroma
+    # channels measure |frame - median|, whose edge response is mostly alignment
+    # residual, so attenuating them at content edges is correct. But a real
+    # scratch/crease IS a ridge, often crossing or near artwork edges -- gradient
+    # attenuation suppresses the actual defect signal there and craters recall
+    # (sweep: ridge-atten drops front surface recall 8/8 -> 5/8). The patch-
+    # tolerant static-ridge cancel above (f_median_dil) is what suppresses the
+    # ridge channel's residual FPs, with no recall cost.
     r_dev *= atten
     r_chroma *= atten
 
