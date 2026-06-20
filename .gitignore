@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+
+# Card recordings and generated outputs (the friend's own inputs/results)
+*.mp4
+*.MOV
+*.mov
+debug/
+**/debug/
+
+# Local data / scratch not part of the runnable pipeline
+samples/
+experiments/
+eval/
